@@ -1,0 +1,177 @@
+<html>
+    <head>
+        <title>COG on MapLibre GL JS</title>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+        <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+        <script src="https://unpkg.com/pmtiles@2.11.0/dist/index.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/geotiff"></script>
+        <style>
+            body {
+                margin: 0;
+            }
+
+            #map {
+                height: 100%;
+                width: 100%;
+            }
+        </style>
+    </head>
+
+    <body>
+        <div id="map"></div>
+        <script type="module">
+            // Terrain-RGB形式への変換モジュール
+            import { makeNumPngProtocol } from './numPngProtocol.js';
+            maplibregl.addProtocol('numpng', makeNumPngProtocol());
+
+            // addProtocolの設定
+            let protocol = new pmtiles.Protocol();
+            maplibregl.addProtocol('pmtiles', protocol.tile);
+
+            // 'GeoTIFF'パッケージから 'fromUrl' と 'Pool' 関数をインポート
+            const { fromUrl, Pool } = GeoTIFF;
+
+            // 'fast-png'パッケージから'encode'関数をインポート。これは画像データをPNG形式にエンコードするために使用。
+            import { encode as fastPngEncode } from 'https://cdn.jsdelivr.net/npm/fast-png@6.1.0/+esm';
+
+            // タイルのx/y/z座標をWebメルカトルの境界ボックスに変換する関数を定義
+            const merc = (x, y, z) => {
+                const GEO_R = 6378137;
+                const orgX = -1 * ((2 * GEO_R * Math.PI) / 2);
+                const orgY = (2 * GEO_R * Math.PI) / 2;
+                const unit = (2 * GEO_R * Math.PI) / Math.pow(2, z);
+                const minx = orgX + x * unit;
+                const maxx = orgX + (x + 1) * unit;
+                const miny = orgY - (y + 1) * unit;
+                const maxy = orgY - y * unit;
+                return [minx, miny, maxx, maxy];
+            };
+
+            // Cloud Optimized GeoTIFF(COG)ソースを生成する非同期関数を定義
+            const generateCogSource = async (url) => {
+                // GeoTIFFから指定されたURLの画像を読み込み
+                const tiff = await fromUrl(url);
+                const pool = new Pool();
+                maplibregl.addProtocol('cog', (params, callback) => {
+                    const segments = params.url.split('/');
+                    console.log('segments:' + segments);
+                    // タイルインデックスの取得
+                    const [z, x, y] = segments.slice(segments.length - 3).map(Number);
+                    // webmercator-bboxを取得
+                    const bbox = merc(x, y, z);
+                    // 画像のサイズを指定
+                    const size = 256;
+                    // GeoTIFFから特定の境界ボックス(bbox)内のラスターデータを読み込み
+                    tiff.readRasters({
+                        bbox,
+                        samples: [0, 1, 2, 3], // 4つのバンド（赤、緑、青、アルファ）を取得する
+                        width: size, // 読み込む画像のサイズを指定
+                        height: size, // 読み込む画像のサイズを指定
+                        interleave: true, // バンドを交互に読み込む
+                        pool, // 並列処理のためのワーカープールを指定
+                    }).then((data) => {
+                        const img = new ImageData(new Uint8ClampedArray(data), size, size);
+                        // imgデータをPNG形式にエンコード
+                        const png = fastPngEncode(img);
+                        callback(null, png, null, null);
+                    });
+                    return { cancel: () => {} };
+                });
+
+                // RasterSourceSpecificationに対応するソースオブジェクトを生成
+                const source = {
+                    type: 'raster',
+                    tiles: [`cog://${url.split('://')[1]}/{z}/{x}/{y}`],
+                    tileSize: 256,
+                    minzoom: 2,
+                    maxzoom: 18,
+                    attribution: '<a href="https://www.geospatial.jp/ckan/dataset/tokyopc-shima-2023">東京都デジタルツイン実現プロジェクト 島しょ地域点群データ</a>',
+                };
+
+                return { source };
+            };
+
+            // マップを初期化
+            const map = new maplibregl.Map({
+                container: 'map',
+                style: 'std.json',
+                // style: 'https://tile.openstreetmap.jp/styles/maptiler-basic-ja/style.json',
+                hash: true,
+                zoom: 15.17,
+                center: [139.76739, 32.450516], // ///0/60
+                pitch: 60,
+                maxPitch: 85,
+                bearing: 0,
+                attributionControl: false,
+            });
+
+            // ズーム・回転
+            map.addControl(new maplibregl.NavigationControl());
+
+            // フルスクリーンモードのオンオフ
+            map.addControl(new maplibregl.FullscreenControl());
+
+            // 現在位置表示
+            map.addControl(
+                new maplibregl.GeolocateControl({
+                    positionOptions: {
+                        enableHighAccuracy: false,
+                    },
+                    fitBoundsOptions: { maxZoom: 18 },
+                    trackUserLocation: true,
+                    showUserLocation: true,
+                })
+            );
+
+            // スケール表示
+            map.addControl(
+                new maplibregl.ScaleControl({
+                    maxWidth: 200,
+                    unit: 'metric',
+                })
+            );
+
+            // Attributionを折りたたみ表示
+            map.addControl(
+                new maplibregl.AttributionControl({
+                    compact: true,
+                    customAttribution: '（<a href="https://twitter.com/shi__works" target="_blank">Twitter</a> | <a href="" target="_blank">Github</a>） ',
+                })
+            );
+
+            // 3D地形コントロール
+            map.addControl(
+                new maplibregl.TerrainControl({
+                    source: 'aist-dem',
+                    exaggeration: 1, // 標高を強調する倍率
+                })
+            );
+
+            // マップのロードが完了したら、COGソースを生成しレイヤーに追加
+            map.on('load', async () => {
+                // 産総研 シームレス標高タイルソース
+                map.addSource('aist-dem', {
+                    type: 'raster-dem',
+                    tiles: ['numpng://tiles.gsj.jp/tiles/elev/mixed/{z}/{y}/{x}.png'],
+                    attribution: '<a href="https://tiles.gsj.jp/tiles/elev/tiles.html" target="_blank">産業技術総合研究所 シームレス標高タイル(統合DEM)</a>',
+                    tileSize: 256,
+                });
+
+                // 産総研 シームレス標高タイルセット
+                map.setTerrain({ source: 'aist-dem', exaggeration: 1 });
+
+                const { source } = await generateCogSource('https://xs489works.xsrv.jp/cog-data/tokyo-digitaltwin/tokyo-aogashima-dem-csmap-cog.tif');
+                map.addSource('cogSample', source);
+                map.addLayer({
+                    id: 'cogLayer',
+                    type: 'raster',
+                    source: 'cogSample',
+                });
+            });
+
+            map.showTileBoundaries = false;
+        </script>
+    </body>
+</html>
